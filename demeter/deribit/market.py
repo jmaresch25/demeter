@@ -382,6 +382,11 @@ class DeribitOptionMarket(Market):
             )
         else:
             position = self.positions[instrument_name]
+            if position.amount < Decimal(0) and amount > abs(position.amount):
+                raise DemeterError(
+                    f"amount is greater than the short position for {instrument_name}, "
+                    f"position amount is {position.amount}, amount to buy is {amount}"
+                )
             position.avg_buy_price = Order.get_average_price(
                 [
                     Order(average_price, amount),
@@ -390,6 +395,8 @@ class DeribitOptionMarket(Market):
             )
             position.buy_amount += amount
             position.amount += amount
+            if position.amount == Decimal(0):
+                del self.positions[instrument_name]
         self._record_action(
             BuyAction(
                 market=self._market_info,
@@ -460,23 +467,38 @@ class DeribitOptionMarket(Market):
         fee = self.get_trade_fee(amount, total_premium)
         self._add_to_balance(total_premium - fee)
 
-        # subtract position
+        # subtract position / open short position
         average_price = Order.get_average_price(bid_list)
         if instrument_name not in self.positions.keys():
-            raise DemeterError("No such instrument position")
+            self.positions[instrument_name] = OptionPosition(
+                instrument_name=instrument_name,
+                expiry_time=instrument.expiry_time,
+                strike_price=instrument.strike_price,
+                type=OptionKind(instrument.type),
+                amount=-amount,
+                avg_buy_price=Decimal(0),
+                buy_amount=Decimal(0),
+                avg_sell_price=average_price,
+                sell_amount=amount,
+            )
+        else:
+            position = self.positions[instrument_name]
+            if position.amount > Decimal(0) and amount > position.amount:
+                raise DemeterError(
+                    f"amount is greater than the long position for {instrument_name}, "
+                    f"position amount is {position.amount}, amount to sell is {amount}"
+                )
+            position.avg_sell_price = Order.get_average_price(
+                [
+                    Order(average_price, amount),
+                    Order(position.avg_sell_price, position.sell_amount),
+                ]
+            )
+            position.sell_amount += amount
+            position.amount -= amount
 
-        position = self.positions[instrument_name]
-        position.avg_sell_price = Order.get_average_price(
-            [
-                Order(average_price, amount),
-                Order(position.avg_sell_price, position.sell_amount),
-            ]
-        )
-        position.sell_amount += amount
-        position.amount -= amount
-
-        if position.amount <= Decimal(0):
-            del self.positions[instrument_name]
+            if position.amount == Decimal(0):
+                del self.positions[instrument_name]
 
         self._record_action(
             SellAction(
@@ -682,23 +704,27 @@ class DeribitOptionMarket(Market):
         """
         deliver option
         """
+        amount = abs(option_pos.amount)
         fee = self.get_deliver_fee(
-            option_pos.amount,
-            option_pos.amount * round_decimal(instrument.mark_price, self.decimal),
+            amount,
+            amount * round_decimal(instrument.mark_price, self.decimal),
         )
         if is_call:
             price_diff = instrument.underlying_price - option_pos.strike_price
         else:
             price_diff = option_pos.strike_price - instrument.underlying_price
 
-        balance_to_add = round_decimal(
-            option_pos.amount * Decimal(price_diff / instrument.underlying_price),
+        balance_to_settle = round_decimal(
+            amount * Decimal(price_diff / instrument.underlying_price),
             self.decimal,
         )
-        if balance_to_add <= fee:
+        if balance_to_settle <= fee:
             return None, None
-        self._add_to_balance(balance_to_add - fee)
-        return balance_to_add, fee
+        if option_pos.amount > Decimal(0):
+            self._add_to_balance(balance_to_settle - fee)
+            return balance_to_settle, fee
+        self._subtract_from_balance(balance_to_settle + fee)
+        return -balance_to_settle, fee
 
     # endregion
 
