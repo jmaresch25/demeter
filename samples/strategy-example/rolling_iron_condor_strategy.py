@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from demeter import Strategy, MarketInfo, Actuator, Snapshot, MarketTypeEnum
+from demeter import Strategy, MarketInfo, Actuator, Snapshot, MarketTypeEnum, DemeterError
 from demeter.deribit import DeribitOptionMarket, load_deribit_option_data, get_price_from_data
 
 
@@ -157,10 +157,16 @@ class RollingIronCondorStrategy(Strategy):
 
     def _close_condor(self, *, market: DeribitOptionMarket, state: IronCondorState) -> None:
         # Close: sell wings first, then buy back shorts
-        market.sell(state.long_put.instrument_name, state.amount)
-        market.sell(state.long_call.instrument_name, state.amount)
-        market.buy(state.short_put.instrument_name, state.amount)
-        market.buy(state.short_call.instrument_name, state.amount)
+        for action, instrument in (
+            (market.sell, state.long_put.instrument_name),
+            (market.sell, state.long_call.instrument_name),
+            (market.buy, state.short_put.instrument_name),
+            (market.buy, state.short_call.instrument_name),
+        ):
+            try:
+                action(instrument, state.amount)
+            except DemeterError as exc:
+                logger.warning("Skipping close for %s: %s", instrument, exc)
 
     @staticmethod
     def _condor_positions_still_exist(*, market: DeribitOptionMarket, state: IronCondorState) -> bool:
