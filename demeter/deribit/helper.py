@@ -105,8 +105,10 @@ def load_deribit_option_data(start_date: date, end_date: date, data_path: str) -
     logger = logging.getLogger("Deribit data")
 
     cache_key = CacheManager.get_cache_key(MarketTypeEnum.deribit_option.name, start_date, end_date, address="ETH")
+    #if cache_df is not None:
+    #   return cache_df
     cache_df = CacheManager.load(cache_key)
-    if cache_df is not None:
+    if cache_df is not None and not cache_df.empty:
         return cache_df
 
     logger.info(f"{MarketTypeEnum.deribit_option.name} start load files from {start_date} to {end_date}...")
