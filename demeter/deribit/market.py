@@ -390,6 +390,8 @@ class DeribitOptionMarket(Market):
             )
             position.buy_amount += amount
             position.amount += amount
+            if position.amount == Decimal(0):
+                del self.positions[instrument_name]
         self._record_action(
             BuyAction(
                 market=self._market_info,
@@ -463,20 +465,30 @@ class DeribitOptionMarket(Market):
         # subtract position
         average_price = Order.get_average_price(bid_list)
         if instrument_name not in self.positions.keys():
-            raise DemeterError("No such instrument position")
+            self.positions[instrument_name] = OptionPosition(
+                instrument_name=instrument_name,
+                expiry_time=instrument.expiry_time,
+                strike_price=instrument.strike_price,
+                type=OptionKind(instrument.type),
+                amount=Decimal(0) - amount,
+                avg_buy_price=Decimal(0),
+                buy_amount=Decimal(0),
+                avg_sell_price=average_price,
+                sell_amount=amount,
+            )
+        else:
+            position = self.positions[instrument_name]
+            position.avg_sell_price = Order.get_average_price(
+                [
+                    Order(average_price, amount),
+                    Order(position.avg_sell_price, position.sell_amount),
+                ]
+            )
+            position.sell_amount += amount
+            position.amount -= amount
 
-        position = self.positions[instrument_name]
-        position.avg_sell_price = Order.get_average_price(
-            [
-                Order(average_price, amount),
-                Order(position.avg_sell_price, position.sell_amount),
-            ]
-        )
-        position.sell_amount += amount
-        position.amount -= amount
-
-        if position.amount <= Decimal(0):
-            del self.positions[instrument_name]
+            if position.amount == Decimal(0):
+                del self.positions[instrument_name]
 
         self._record_action(
             SellAction(

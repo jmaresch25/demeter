@@ -418,6 +418,7 @@ class Actuator(object):
                 # execute strategy, and some calculate
                 self._currents.timestamp = timestamp_index.to_pydatetime()
                 snapshot = self.__get_snapshot(timestamp_index, row_id, current_price)
+                after_snapshot = snapshot
                 try:
                     self._strategy.before_bar(snapshot)
 
