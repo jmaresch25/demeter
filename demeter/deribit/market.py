@@ -73,6 +73,8 @@ class DeribitOptionMarket(Market):
         self.quote_token = token
 
     MAX_FEE_RATE = Decimal("0.125")
+    MAX_ORDER_SCAN = 10_000
+    MAX_POSITION_SCAN = 10_000
     ETH = TokenInfo("eth", 18)
     BTC = TokenInfo("btc", 8)
     TOKEN_CONFIGS = {
@@ -111,6 +113,10 @@ class DeribitOptionMarket(Market):
         self._data = pd.read_pickle(path)
         self.logger.info("data has been prepared")
 
+    def _validate_amount(self, amount: Decimal | float, action: str) -> None:
+        if amount <= 0:
+            raise DemeterError(f"{action} amount must be greater than 0, got {amount}")
+
     @float_param_formatter
     def deposit(self, amount: Decimal | float) -> Decimal:
         """
@@ -120,6 +126,7 @@ class DeribitOptionMarket(Market):
         :return: new balance
         :rtype: Decimal
         """
+        self._validate_amount(amount, "Deposit")
         self.broker.subtract_from_balance(self.token, amount)
         self._add_to_balance(amount)
         self._record_action(
@@ -145,6 +152,7 @@ class DeribitOptionMarket(Market):
         :return: new balance
         :rtype: Decimal
         """
+        self._validate_amount(amount, "Withdraw")
         new_balance = self._subtract_from_balance(amount)
         # Actually, withdraw fee should be charged, but the amount is depended on network condition
         # https://www.deribit.com/kb/fees
@@ -204,6 +212,8 @@ class DeribitOptionMarket(Market):
                 data.data = pd.DataFrame(columns=self._data.columns)
                 if self._is_open():
                     logging.warning(f"Deribit data in {data.timestamp} doesn't exist")
+        if not isinstance(data.data, pd.DataFrame):
+            raise DemeterError("Deribit market status data must be a DataFrame")
         self._market_status = data
 
     # region for option market only
@@ -293,6 +303,7 @@ class DeribitOptionMarket(Market):
         :param price_in_token: trading price, if set to none, will use price in orderbook
         :return: cost amount + fee amount
         """
+        self._validate_amount(amount, "Trade")
         amount = self.__get_trade_amount(amount)
         row = self.data.loc[(self._market_status.timestamp, instrument_name)]
         order_list = row.asks if trade_type == "buy" else row.bids
@@ -512,13 +523,19 @@ class DeribitOptionMarket(Market):
         """
         order_list = []
         if price_in_token is not None:
-            for order in orders:
+            for idx, order in enumerate(orders):
+                if idx >= self.MAX_ORDER_SCAN:
+                    self.logger.warning("Reached max order scan while matching price-specific order.")
+                    break
                 if price_in_token == Decimal(str(order[0])):
                     order[1] -= amount
                     order_list.append(Order(price_in_token, amount))
         else:
             amount_to_deduct = amount
-            for order in orders:
+            for idx, order in enumerate(orders):
+                if idx >= self.MAX_ORDER_SCAN:
+                    self.logger.warning("Reached max order scan while matching market order.")
+                    break
                 if order[1] == 0 or order[1] == Decimal(0):
                     continue
                 should_deduct = min(Decimal(str(order[1])), amount_to_deduct)
@@ -541,6 +558,9 @@ class DeribitOptionMarket(Market):
 
         :param max_mark_price_multiple: times to mark_price, if order price is greater than mark_price * max_allowed, will not buy beyond price
         """
+        self._validate_amount(amount, "Trade")
+        if self._market_status.data is None:
+            raise DemeterError("Deribit market status data is not available")
         if instrument_name not in self._market_status.data.index:
             raise DemeterError(f"{instrument_name} is not in current orderbook")
         instrument: InstrumentStatus = self._market_status.data.loc[instrument_name]
@@ -557,15 +577,15 @@ class DeribitOptionMarket(Market):
         if is_buy:
             if max_mark_price_multiple is not None:
                 max_price = max_mark_price_multiple * Decimal(instrument.mark_price)
-                available_orders = list(filter(lambda x: x[0] < max_price, instrument.asks))
+                available_orders = list(filter(lambda x: x[0] < max_price, instrument.asks or []))
             else:
-                available_orders = instrument.asks
+                available_orders = instrument.asks or []
         else:
             if max_mark_price_multiple is not None:
                 min_price = Decimal(instrument.mark_price) / max_mark_price_multiple
-                available_orders = list(filter(lambda x: x[0] > min_price, instrument.bids))
+                available_orders = list(filter(lambda x: x[0] > min_price, instrument.bids or []))
             else:
-                available_orders = instrument.bids
+                available_orders = instrument.bids or []
 
         if price_in_token is not None:
             # to prevent error in decimal
@@ -612,7 +632,10 @@ class DeribitOptionMarket(Market):
         if self._is_open():
             total_premium = Decimal(0)
             delta = gamma = Decimal(0)
-            for position in self.positions.values():
+            for idx, position in enumerate(self.positions.values()):
+                if idx >= self.MAX_POSITION_SCAN:
+                    self.logger.warning("Reached max position scan while calculating market balance.")
+                    break
                 # data may missing due to unstable collect server
                 if position.instrument_name not in self.market_status.data.index:
                     continue
@@ -636,7 +659,10 @@ class DeribitOptionMarket(Market):
         | if out of the money, then abandon
         """
         key_to_remove = []
-        for pos_key, position in self.positions.items():
+        for idx, (pos_key, position) in enumerate(self.positions.items()):
+            if idx >= self.MAX_POSITION_SCAN:
+                self.logger.warning("Reached max position scan while checking option exercise.")
+                break
             if self._market_status.timestamp >= position.expiry_time:
                 # should not happen
                 if position.instrument_name in self._market_status.data.index:
@@ -694,6 +720,9 @@ class DeribitOptionMarket(Market):
         """
         deliver option
         """
+        if instrument.underlying_price in (0, None):
+            self.logger.warning("Underlying price unavailable for delivery calculation.")
+            return None, None
         fee = self.get_deliver_fee(
             option_pos.amount,
             option_pos.amount * round_decimal(instrument.mark_price, self.decimal),
