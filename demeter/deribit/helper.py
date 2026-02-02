@@ -8,10 +8,12 @@ from decimal import Decimal
 from typing import Any, Final, List, Tuple
 
 import pandas as pd
+from pydantic import BaseModel, TypeAdapter, ValidationError, field_validator
 
 from demeter import MarketTypeEnum
 from demeter.broker import BASE_FREQ
 from demeter.data import CacheManager
+from demeter._typing import DemeterError
 from demeter.utils import console_text
 
 
@@ -90,24 +92,55 @@ def position_to_df(positions: Any) -> pd.DataFrame:
 
 
 def decode_instrument(instrument_name: str) -> Tuple[str, datetime, int, str]:
-    split: list[str] = instrument_name.split("-")
-    type_: str = "PUT" if split[3] == "P" else "CALL"
-    k: int = int(split[2])
-    exec_time: datetime = datetime.strptime(split[1] + " 08:00:00", "%d%b%y %H:%M:%S")
-    token: str = split[0]
-    return token, exec_time, k, type_
+    try:
+        payload = _InstrumentNamePayload.from_instrument_name(instrument_name)
+    except (ValueError, ValidationError) as exc:
+        raise DemeterError(f"Invalid deribit instrument name: {instrument_name}") from exc
+    return payload.token, payload.expiry_time, payload.strike_price, payload.option_type
 
 
 def order_converter(array_str: str) -> List[List[float]]:
-    parsed: Any = json.loads(array_str)
-    if not isinstance(parsed, list):
+    try:
+        parsed: Any = json.loads(array_str)
+    except json.JSONDecodeError:
         return []
-    out: List[List[float]] = []
-    for lvl in parsed:
-        if not isinstance(lvl, list) or len(lvl) != 2:
-            continue
-        out.append([float(lvl[0]), float(lvl[1])])
-    return out
+    try:
+        validated_levels = _ORDER_LEVELS_ADAPTER.validate_python(parsed)
+    except ValidationError:
+        return []
+    return [[float(price), float(amount)] for price, amount in validated_levels]
+
+
+class _InstrumentNamePayload(BaseModel):
+    token: str
+    expiry_time: datetime
+    strike_price: int
+    option_type: str
+
+    @field_validator("option_type")
+    @classmethod
+    def _validate_option_type(cls, value: str) -> str:
+        if value not in {"PUT", "CALL"}:
+            raise ValueError("option_type must be PUT or CALL")
+        return value
+
+    @classmethod
+    def from_instrument_name(cls, instrument_name: str) -> "_InstrumentNamePayload":
+        split = instrument_name.split("-")
+        if len(split) != 4:
+            raise ValueError("instrument name must have four parts")
+        token, date_part, strike_part, kind_part = split
+        option_type = "PUT" if kind_part == "P" else "CALL" if kind_part == "C" else kind_part
+        expiry_time = datetime.strptime(f"{date_part} 08:00:00", "%d%b%y %H:%M:%S")
+        return cls(
+            token=token,
+            expiry_time=expiry_time,
+            strike_price=int(strike_part),
+            option_type=option_type,
+        )
+
+
+_ORDER_LEVELS_ADAPTER = TypeAdapter(List[Tuple[float, float]])
 
 
 def load_deribit_option_data(start_date: date, end_date: date, data_path: str) -> pd.DataFrame:
