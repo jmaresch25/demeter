@@ -29,8 +29,8 @@ class SimpleStrategy(Strategy):
 
 if __name__ == "__main__":
     market = DeribitOptionMarket(market_key, DeribitOptionMarket.ETH)
-    data_path = Path(__file__).resolve().parents[2] / "tests" / "data"
-    data = load_deribit_option_data(date(2024, 2, 15), date(2024, 2, 16), data_path=str(data_path))
+    data_path = Path(__file__).resolve().parents[2] / "tests" / "data" / "eth_db"
+    data = load_deribit_option_data(date(2024, 5, 11), date(2024, 7, 20), data_path=str(data_path))
     market.data = data
     actuator = Actuator()
     actuator.broker.add_market(market)
